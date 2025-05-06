@@ -78,16 +78,24 @@ update msg model =
       ( ActiveGame ({ gameState | currentPlayer = givePlayerDice dice gameState.currentPlayer })
       , Cmd.none
       )
-    (ActiveGame gameState, Game (Choose die)) ->
+    (ActiveGame gameState, Game (Choose sumPair)) ->
       let 
-        _ = if isDieChoiceLegal die gameState then
-              log "die choice is playable" ()
-            else
-              log "die choice is not playable" ()
+        playerCanUseChoice = if (isSumChoiceLegal (Tuple.first sumPair) gameState)
+                                || (isSumChoiceLegal (Tuple.second sumPair) gameState) then
+                               --log "sum choice is playable" sumPair
+                               True
+                             else
+                               --log "sum choice is not playable" sumPair
+                               False
       in
-        ( ActiveGame gameState
-        , Cmd.none
-        )
+        if playerCanUseChoice then
+          ( ActiveGame (gameState |> playerUseSumIfPossible (Tuple.first sumPair) |> playerUseSumIfPossible (Tuple.second sumPair))
+          , Cmd.none
+          )
+        else
+          ( ActiveGame gameState
+          , Cmd.none
+          )
     _ ->
       ( model
       , Cmd.none
@@ -130,8 +138,9 @@ renderDice dice =
     -- 0x267f is the unicode point right before the die faces
     dieVisualization dieValue = (0x267f + dieValue) |> Char.fromCode |> String.fromChar
     dicePairSums = sumPairs (Array.fromList dice)
-    pairVisualization (sum1, sum2) =
-      button [ onClick (Game (Choose sum1))] [ text (String.concat [String.fromInt sum1, " and ", String.fromInt sum2]) ]
+    pairVisualization sumPair =
+      button [ onClick (Game (Choose sumPair))]
+      [ text (String.concat [String.fromInt (Tuple.first sumPair), " and ", String.fromInt (Tuple.second sumPair)]) ]
   in
     div [] [ div [ Html.Attributes.style "font-size" "225% "] (List.map (\dieValue ->
                                   text (dieVisualization dieValue)) 
@@ -151,7 +160,7 @@ renderPhaseText player =
 
 renderPlacedTracker tracker = String.concat
   [ "Tracker climbing ladder "
-  , String.fromInt tracker.ladder
+  , String.fromInt (tracker.ladder + 2)
   , " on rung "
   , String.fromInt tracker.position
   ]
@@ -305,14 +314,15 @@ givePlayerDice : List Die -> ActivePlayer -> ActivePlayer
 givePlayerDice dice player =
   { player | turn = Selecting dice}
 
-dieAppliesToTracker : Die -> Tracker -> Bool
-dieAppliesToTracker die tracker =
-  die == tracker.ladder
+-- Sums range from 2 to 12, so value - 2 indexes into the ladder array
+sumAppliesToTracker : Int -> Tracker -> Bool
+sumAppliesToTracker value tracker =
+  (value - 2) == tracker.ladder
 
 isDieChoiceLegal : Die -> GameState -> Bool
 isDieChoiceLegal die gameState =
   let
-    playerCanUseDie = List.any (dieAppliesToTracker die) gameState.currentPlayer.trackers
+    playerCanUseDie = List.any (sumAppliesToTracker die) gameState.currentPlayer.trackers
     playerHasTokens = gameState.currentPlayer.tokens > 0
     laddersClosed = 
       List.foldl
@@ -328,7 +338,25 @@ isDieChoiceLegal die gameState =
         _ ->
           False
 
+isSumChoiceLegal : Int -> GameState -> Bool
+isSumChoiceLegal sum gameState =
+  let
+    playerCanUseSum = List.any (sumAppliesToTracker sum) gameState.currentPlayer.trackers
+    playerHasTokens = gameState.currentPlayer.tokens > 0
+    ladderOpen = isLadderOpen (sum - 2) gameState
+  in
+  ladderOpen && (playerHasTokens || playerCanUseSum)
 
+isLadderOpen : Int -> GameState -> Bool
+isLadderOpen ladderIndex gameState =
+  let
+    ladderHeight = Maybe.withDefault 0 (Array.get ladderIndex ladderHeights)
+  in
+  reducePlayers
+    (\player -> (Maybe.withDefault 0 (Array.get ladderIndex player.progress)))
+    gameState
+    |> List.foldl max 0
+    |> (>) ladderHeight
 
 --advanceTrackerIfPossible : Die -> ActivePlayer -> Result String ActivePlayer 
 --advanceTrackerIfPossible die activePlayer =
@@ -360,6 +388,39 @@ isDieChoiceLegal die gameState =
 --    Ok { ladder = die, position = 1 }
 --  else
 --    Err "die does not apply to this tracker"
+
+-- Pushes a matching tracker if possible, otherwise deploys a new tracker, or does nothing
+playerUseSumIfPossible : Int -> GameState -> GameState
+playerUseSumIfPossible sum gameState =
+  let
+    ladderHeight = Maybe.withDefault 0 (Array.get (sum - 2) ladderHeights)
+    (playableTrackers, remainingTrackers) =
+      List.partition (sumAppliesToTracker sum) gameState.currentPlayer.trackers
+   in
+    case playableTrackers of
+      tracker :: _ ->
+        let
+          newTracker = { tracker | position = tracker.position + 1 }
+        in
+          { gameState | currentPlayer = { player = gameState.currentPlayer.player
+                                        , turn = gameState.currentPlayer.turn
+                                        , trackers = newTracker :: remainingTrackers
+                                        , tokens = gameState.currentPlayer.tokens
+                                        }
+          }
+      [] ->
+        if gameState.currentPlayer.tokens > 0 then
+          let
+            newTracker = { ladder = sum - 2, position = 1 } -- TODO: needs to start at current player's progress
+          in
+          { gameState | currentPlayer = { player = gameState.currentPlayer.player
+                                        , turn = gameState.currentPlayer.turn
+                                        , trackers = newTracker :: remainingTrackers
+                                        , tokens = gameState.currentPlayer.tokens - 1
+                                        }
+          }
+        else
+          gameState
     
 --  
 
@@ -384,10 +445,10 @@ gameStart firstPlayer otherPlayers =
 
 sampleGame : GameState
 sampleGame =
-    { currentPlayer = selectPlayer { id = 0, name = "Alice", progress = Array.repeat 13 0 }
+    { currentPlayer = selectPlayer { id = 0, name = "Alice", progress = emptyProgress }
     , waitingPlayers =
-        [ { id = 1, name = "Bob", progress = Array.fromList [3, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0, 0, 0] }
-        , { id = 2, name = "Charlie", progress = Array.fromList [0, 3, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0, 0] }
+        [ { id = 1, name = "Bob", progress = Array.fromList [3, 0, 0, 0, 0, 0, 0, 8, 0, 0, 0] }
+        , { id = 2, name = "Charlie", progress = Array.fromList [0, 3, 0, 9, 0, 13, 0, 0, 0, 0, 0] }
         ]
     }
 
@@ -404,6 +465,9 @@ heighestProgress : List Int -> List Int -> List Int
 heighestProgress progress1 progress2 =
   List.map2 max progress1 progress2
 
+emptyProgress : Array Int
+emptyProgress = Array.repeat 11 0
+
 --joinCompletedLadders : Array Bool -> Array Bool -> Array Bool
 --joinCompletedLadders ladders1 ladders2 =
 --  List.map2 (||) ladders1 ladders2
@@ -413,7 +477,7 @@ heighestProgress progress1 progress2 =
 type GameEvent =
     Roll
   | NewDice (List Int)
-  | Choose Int
+  | Choose (Int, Int)
   | EndTurn
 
 
